@@ -1,0 +1,14 @@
+name: muf-clust
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - numpy
+  - tifffile
+  - scikit-image
+  - opencv
+  - py-opencv
+  - matplotlib
+  - seaborn
+  - openslide-python
+  - pip

@@ -1,0 +1,8 @@
+# 默认配置（对齐 guide.md 关键开关）
+
+seed: 42
+qc: basic  # off|basic|full
+af_mode: qc  # skip|qc|feature
+spectral_unmix: auto  # auto|on|off
+qc_max_tiles: 5
+keep_intermediate: false
