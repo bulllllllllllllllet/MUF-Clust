@@ -1,0 +1,11 @@
+#运行完整管线：
+PYTHONPATH=src python -m muf_clust.api.cli \
+  --run full \
+  --dataset_dir /nfs5/yj/MIHC/dataset/KidneyCancer/NO2/11/Scan1 \
+  --cancer_type KidneyCancer \
+  --high_res \
+  --ref_channel DAPI \
+  --output_dir /home/zhaoyh/MUF-Clust/outputs
+
+处理单tile
+PYTHONPATH=src python -m muf_clust.api.cli --run full --dataset_dir /nfs5/yj/MIHC/dataset/KidneyCancer/NO2/11/Scan1/11_Scan1.qptiff --cancer_type KidneyCancer --high_res --output_dir /home/zhaoyh/MUF-Clust/outputs --tile_size 1024 --use_cellpose --only_tile_x 18432 --only_tile_y 12288 --cp_model nuclei --cp_diameter 30

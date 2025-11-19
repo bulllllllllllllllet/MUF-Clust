@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Dict, Type
+from typing import Dict
 
 from .base import Plugin, ExamplePlugin
 

@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 import sys
-from typing import Any
 
 
 def _block(msg: str) -> str:

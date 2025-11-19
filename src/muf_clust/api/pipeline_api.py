@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 from typing import Dict, Any, Optional
+import os
 
 from ..utils.logging import log_info
 from ..core.pipeline import Pipeline, Step
@@ -41,6 +42,12 @@ def run_preprocess(image_path: Optional[str] = None,
         "image_path": image_path,
         "dataset_dir": dataset_dir,
         "output_dir": output_dir,
+        "prefer_low_res": not bool((options or {}).get("high_res", True)),
+        "ref_channel": (options or {}).get("ref_channel", "DAPI"),
+        "drift_max_tiles": int((options or {}).get("drift_max_tiles", 0)),
+        "use_cellpose": bool((options or {}).get("use_cellpose", True)),
+        "only_tile_x": (options or {}).get("only_tile_x"),
+        "only_tile_y": (options or {}).get("only_tile_y"),
     }
     result = pipeline.run(context)
     return result
@@ -69,21 +76,74 @@ def run_full_pipeline(input_path: str,
         steps.append(PreprocessStepSkeleton(qc_level=options.get("qc", "basic") if options else "basic",
                                             seed=seed, options=options or {}))
 
-    # 留出其他步骤骨架（segmentation/features/cluster/visualize），后续填充实现
+    # 分割→特征→聚类→可视化（分割已实现，其余保持骨架）
     try:
-        from ..core.steps.segmentation import SegmentationStepSkeleton
+        from ..core.steps.segmentation import SegmentationStep
         from ..core.steps.features import FeatureStepSkeleton
         from ..core.steps.cluster import ClusterStepSkeleton
         from ..core.steps.visualize import VisualizeStepSkeleton
-        steps += [SegmentationStepSkeleton(), FeatureStepSkeleton(), ClusterStepSkeleton(), VisualizeStepSkeleton()]
+        steps += [SegmentationStep(), FeatureStepSkeleton(), ClusterStepSkeleton(), VisualizeStepSkeleton()]
     except Exception:
         pass
 
     pipeline = Pipeline(steps=steps)
+    # 兼容预处理步骤的入参：自动将 input_path 映射为 image_path 或 dataset_dir
+    is_dir = os.path.isdir(input_path)
     context = {
         "input_path": input_path,
+        "image_path": (None if is_dir else input_path),
+        "dataset_dir": (input_path if is_dir else None),
         "output_dir": output_dir,
         "config_path": config_path,
+        "prefer_low_res": not bool((options or {}).get("high_res", True)),
+        "ref_channel": (options or {}).get("ref_channel", "DAPI"),
+        "drift_max_tiles": int((options or {}).get("drift_max_tiles", 0)),
+        "cancer_type": (options or {}).get("cancer_type"),
+        "tile_size": int((options or {}).get("tile_size", 1024)),
+        "use_cellpose": bool((options or {}).get("use_cellpose", True)),
+        "cellpose_model": (options or {}).get("cellpose_model") or "nuclei",
+        "cellpose_gpu": bool((options or {}).get("cellpose_gpu", True)),
+        "cellpose_diameter": (options or {}).get("cellpose_diameter"),
+        "cellpose_batch_size": (options or {}).get("cellpose_batch_size"),
+        "only_tile_x": (options or {}).get("only_tile_x"),
+        "only_tile_y": (options or {}).get("only_tile_y"),
+    }
+    result = pipeline.run(context)
+    return result
+
+
+def run_segmentation(input_path: str,
+                     output_dir: str = "outputs",
+                     options: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """仅执行分割步骤（解耦预处理）。
+
+    中文说明：
+    - 只调用分割步骤，直接在原始 DAPI 图像上进行 Cellpose 分割。
+    - 返回分割输出目录与统计信息。
+    """
+    log_info(f"开始分割（segmentation-only）：input_path={input_path}")
+
+    steps: list[Step] = []
+    from ..core.steps.segmentation import SegmentationStep
+    steps.append(SegmentationStep())
+
+    pipeline = Pipeline(steps=steps)
+    is_dir = os.path.isdir(input_path)
+    context = {
+        "input_path": input_path,
+        "image_path": (None if is_dir else input_path),
+        "dataset_dir": (input_path if is_dir else None),
+        "output_dir": output_dir,
+        "prefer_low_res": not bool((options or {}).get("high_res", True)),
+        "cancer_type": (options or {}).get("cancer_type"),
+        "tile_size": int((options or {}).get("tile_size", 1024)),
+        "use_cellpose": bool((options or {}).get("use_cellpose", True)),
+        "cellpose_model": (options or {}).get("cellpose_model") or "nuclei",
+        "cellpose_gpu": bool((options or {}).get("cellpose_gpu", True)),
+        "cellpose_diameter": (options or {}).get("cellpose_diameter"),
+        "cellpose_batch_size": (options or {}).get("cellpose_batch_size"),
+        "only_tile_x": (options or {}).get("only_tile_x"),
+        "only_tile_y": (options or {}).get("only_tile_y"),
     }
     result = pipeline.run(context)
     return result

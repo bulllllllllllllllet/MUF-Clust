@@ -147,6 +147,7 @@ def normalize_image(img: np.ndarray) -> np.ndarray:
 def edge_map(img: np.ndarray) -> np.ndarray:
     if cv2 is not None:
         img8 = (normalize_image(img) * 255).astype(np.uint8)
+        img8 = cv2.GaussianBlur(img8, (0, 0), 1.2)
         edges = cv2.Canny(img8, 50, 150)
         return edges.astype(np.float32)
     if filters is not None:
@@ -167,22 +168,25 @@ def tile_iter(H: int, W: int, tile: int) -> List[Tuple[int, int, int, int]]:
 
 def phase_drift(dapi: np.ndarray, ch: np.ndarray, upsample: int = 10) -> Tuple[float, float]:
     if registration is None:
-        return 0.0, 0.0
+        raise RuntimeError("需要安装 scikit-image (registration) 才能计算漂移")
     shift, _, _ = registration.phase_cross_correlation(dapi, ch, upsample_factor=upsample)  # type: ignore
     return float(shift[0]), float(shift[1])
 
 
-def drift_vector_field(dapi: np.ndarray, ch: np.ndarray, tile: int = 512) -> Dict[str, np.ndarray]:
-    H, W = dapi.shape
+def drift_vector_field(ref: np.ndarray, ch: np.ndarray, tile: int = 512, max_tiles: int = 0) -> Dict[str, np.ndarray]:
+    H, W = ref.shape
     rects = tile_iter(H, W, tile)
+    if max_tiles and max_tiles > 0 and len(rects) > max_tiles:
+        step = max(1, int(math.ceil(len(rects) / float(max_tiles))))
+        rects = rects[::step]
     centers_y: List[float] = []
     centers_x: List[float] = []
     dys: List[float] = []
     dxs: List[float] = []
     for (y, x, h, w) in rects:
-        d = dapi[y : y + h, x : x + w]
+        r = ref[y : y + h, x : x + w]
         c = ch[y : y + h, x : x + w]
-        dy, dx = phase_drift(d, c)
+        dy, dx = phase_drift(r, c)
         centers_y.append(y + h / 2.0)
         centers_x.append(x + w / 2.0)
         dys.append(dy)
@@ -209,21 +213,25 @@ def plot_drift_quiver(field: Dict[str, np.ndarray], out_path: str, title: str = 
     plt.close()
 
 
-def overlay_edges(dapi: np.ndarray, ch: np.ndarray) -> np.ndarray:
-    d_e = edge_map(dapi)
+def overlay_edges(ref: np.ndarray, ch: np.ndarray) -> np.ndarray:
+    r_e = edge_map(ref)
     c_e = edge_map(ch)
-    d_n = normalize_image(d_e)
+    r_n = normalize_image(r_e)
     c_n = normalize_image(c_e)
-    rgb = np.zeros((dapi.shape[0], dapi.shape[1], 3), dtype=np.float32)
-    rgb[..., 2] = d_n
+    rgb = np.zeros((ref.shape[0], ref.shape[1], 3), dtype=np.float32)
+    rgb[..., 2] = r_n
     rgb[..., 0] = c_n
-    rgb[..., 1] = 0.5 * (d_n + c_n)
+    rgb[..., 1] = 0.5 * (r_n + c_n)
     return np.clip(rgb, 0.0, 1.0)
 
 
 def save_image(img: np.ndarray, out_path: str) -> None:
     if plt is None:
         return
+    import os
+    dirn = os.path.dirname(out_path)
+    if dirn:
+        ensure_dir(dirn)
     plt.figure(figsize=(8, 8))
     if img.ndim == 2:
         plt.imshow(img, cmap="gray")
@@ -313,10 +321,10 @@ def save_heatmap(heat: np.ndarray, out_path: str, title: str = "Image quality sc
     plt.close()
 
 
-def process_one_image(path: str, configs: List[ChannelSpec], out_dir: str, seed: int = 42, tile: int = 512) -> Dict[str, object]:
+def process_one_image(path: str, configs: List[ChannelSpec], out_dir: str, seed: int = 42, tile: int = 512, prefer_low_res: bool = True, ref_channel: Optional[str] = None, drift_max_tiles: int = 0) -> Dict[str, object]:
     random.seed(seed)
     ensure_dir(out_dir)
-    stack = read_qptiff_stack(path, prefer_low_res=True)
+    stack = read_qptiff_stack(path, prefer_low_res=prefer_low_res)
 
     C = stack.shape[0]
     use_configs = [c for c in configs if (c.index - 1) < C]
@@ -334,16 +342,30 @@ def process_one_image(path: str, configs: List[ChannelSpec], out_dir: str, seed:
         "quality": {},
     }
 
+    H0, W0 = stack.shape[-2], stack.shape[-1]
+    tile_eff = tile
+    if math.ceil(H0 / tile_eff) < 2 or math.ceil(W0 / tile_eff) < 2:
+        tile_eff = max(min(H0, W0) // 2, 64)
+
+    ref_name = (configs[dapi_idx].name if dapi_idx < len(configs) else "DAPI")
+    if ref_channel:
+        for spec in use_configs:
+            if spec.name == ref_channel and (spec.index - 1) < C:
+                dapi_idx = spec.index - 1
+                dapi = stack[dapi_idx]
+                ref_name = spec.name
+                break
+
     for spec in use_configs:
         ci = spec.index - 1
         ch = stack[ci]
-        field = drift_vector_field(dapi, ch, tile=tile)
+        field = drift_vector_field(dapi, ch, tile=tile_eff, max_tiles=int(drift_max_tiles))
         max_disp = float(np.max(np.hypot(field["dx"], field["dy"])) if len(field["dx"]) > 0 else 0.0)
         mean_disp = float(np.mean(np.hypot(field["dx"], field["dy"])) if len(field["dx"]) > 0 else 0.0)
         report["drift"][spec.name] = {"max_px": max_disp, "mean_px": mean_disp}
         overlay = overlay_edges(dapi, ch)
-        save_image(overlay, os.path.join(out_dir, f"align_overlay_{spec.name}.png"))
-        plot_drift_quiver(field, os.path.join(out_dir, f"drift_quiver_{spec.name}.png"), title=f"{spec.name} drift vector field")
+        save_image(overlay, os.path.join(out_dir, f"align_overlay_{ref_name}_vs_{spec.name}.png"))
+        plot_drift_quiver(field, os.path.join(out_dir, f"drift_quiver_{ref_name}_vs_{spec.name}.png"), title=f"{ref_name} drift vector field")
 
     labels = [s.name for s in use_configs]
     corr = spectral_crosstalk_matrix(stack)
@@ -372,12 +394,12 @@ def process_one_image(path: str, configs: List[ChannelSpec], out_dir: str, seed:
         drop_ratio = (med_raw - med_corr) / (med_raw + 1e-8)
         report["af"] = {"median_raw": med_raw, "median_corrected": med_corr, "median_drop_ratio": float(drop_ratio)}
 
-    heat, qinfo = quality_heatmap(dapi, tile=tile)
+    heat, qinfo = quality_heatmap(dapi, tile=tile_eff)
     save_heatmap(heat, os.path.join(out_dir, "quality_heatmap.png"))
     report["quality"] = qinfo
 
     H, W = dapi.shape
-    rects = tile_iter(H, W, tile)
+    rects = tile_iter(H, W, tile_eff)
     if len(rects) > 0 and plt is not None:
         random.shuffle(rects)
         import os
@@ -414,6 +436,7 @@ class PreprocessStep:
         output_root = context.get("output_dir", "outputs")
         image_path = context.get("image_path")
         dataset_dir = context.get("dataset_dir")
+        prefer_low_res = bool(context.get("prefer_low_res", True))
 
         configs = get_config(cancer_type)
         if not configs:
@@ -451,7 +474,16 @@ class PreprocessStep:
             ensure_dir(out_dir)
             log_info(f"[{idx}/{len(images)}] 处理 {img_path} → {out_dir}")
             try:
-                rep = process_one_image(img_path, configs, out_dir, seed=self.seed, tile=tile_size)
+                rep = process_one_image(
+                    img_path,
+                    configs,
+                    out_dir,
+                    seed=self.seed,
+                    tile=tile_size,
+                    prefer_low_res=prefer_low_res,
+                    ref_channel=(context.get("ref_channel") if isinstance(context.get("ref_channel"), str) else None),
+                    drift_max_tiles=int(context.get("drift_max_tiles", 0)),
+                )
                 reports[sample_name] = rep
             except Exception as e:
                 log_error("处理失败")
