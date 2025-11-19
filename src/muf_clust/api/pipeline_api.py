@@ -95,7 +95,7 @@ def run_full_pipeline(input_path: str,
         "dataset_dir": (input_path if is_dir else None),
         "output_dir": output_dir,
         "config_path": config_path,
-        "prefer_low_res": not bool((options or {}).get("high_res", True)),
+        "prefer_low_res": bool((options or {}).get("prefer_low_res", False)),
         "ref_channel": (options or {}).get("ref_channel", "DAPI"),
         "drift_max_tiles": int((options or {}).get("drift_max_tiles", 0)),
         "cancer_type": (options or {}).get("cancer_type"),
@@ -120,6 +120,17 @@ def run_segmentation(input_path: str,
     中文说明：
     - 只调用分割步骤，直接在原始 DAPI 图像上进行 Cellpose 分割。
     - 返回分割输出目录与统计信息。
+
+    默认参数说明（若 `options` 未提供对应键，将使用如下默认）：
+    - `prefer_low_res=False`：默认使用高分辨率层进行读取与分割。
+    - `cancer_type=None`：通道配置类别（为空则在下游使用全局默认）。
+    - `tile_size=1024`：分割时的 tile 尺寸（像素）。
+    - `use_cellpose=True`：启用 Cellpose 进行分割。
+    - `cellpose_model='nuclei'`：Cellpose 模型类型（核分割）。
+    - `cellpose_gpu=True`：启用 GPU（若不可用则在下游报错）。
+    - `cellpose_diameter=None`：核直径（像素，None 由 Cellpose自动/默认推断）。
+    - `cellpose_batch_size=None`：推理批大小（None 使用库默认）。
+    - `only_tile_x=None` / `only_tile_y=None`：仅处理指定 tile 坐标（None 处理全部）。
     """
     log_info(f"开始分割（segmentation-only）：input_path={input_path}")
 
@@ -134,7 +145,7 @@ def run_segmentation(input_path: str,
         "image_path": (None if is_dir else input_path),
         "dataset_dir": (input_path if is_dir else None),
         "output_dir": output_dir,
-        "prefer_low_res": not bool((options or {}).get("high_res", True)),
+        "prefer_low_res": bool((options or {}).get("prefer_low_res", False)),
         "cancer_type": (options or {}).get("cancer_type"),
         "tile_size": int((options or {}).get("tile_size", 1024)),
         "use_cellpose": bool((options or {}).get("use_cellpose", True)),

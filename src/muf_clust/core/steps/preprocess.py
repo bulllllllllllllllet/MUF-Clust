@@ -56,7 +56,7 @@ def list_images(dataset_dir: str, pattern: Tuple[str, ...] = (".qptiff", ".tif",
     return sorted(files)
 
 
-def read_qptiff_stack(path: str, prefer_low_res: bool = True) -> np.ndarray:
+def read_qptiff_stack(path: str, prefer_low_res: bool = False) -> np.ndarray:
     if tifffile is None:
         raise RuntimeError("需要安装 tifffile 以按多通道读取 QPTIFF/TIFF")
 
