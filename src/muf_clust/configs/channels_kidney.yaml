@@ -6,7 +6,7 @@
 - index: 2
   name: Opal480
   marker: "CD20"
-  biological_role: "细胞质"
+  biological_role: "细胞膜"
 - index: 3
   name: Opal520
   marker: "CD3"
@@ -18,7 +18,7 @@
 - index: 5
   name: Opal620
   marker: "CD23"
-  biological_role: "细胞核"
+  biological_role: "细胞膜"
 - index: 6
   name: Opal690
   marker: "CD8"

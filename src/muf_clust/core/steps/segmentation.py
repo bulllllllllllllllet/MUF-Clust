@@ -49,8 +49,9 @@ from .preprocess import read_qptiff_stack, list_images, tile_iter
 # - 依赖项均按“可选导入”处理，缺失库时会提供中文错误提示并终止。
 
 
+#  将输入图像线性缩放到 0–255 的 8bit，用于可视化与存盘
 def _to_uint8(x: np.ndarray) -> np.ndarray:
-    # 中文：将任意浮点图归一化到 8bit，便于可视化与 OpenCV 处理
+    #  将任意浮点图归一化到 8bit，便于可视化与 OpenCV 处理
     m = float(np.min(x))
     M = float(np.max(x))
     if M <= m:
@@ -59,40 +60,41 @@ def _to_uint8(x: np.ndarray) -> np.ndarray:
     return (y * 255.0).astype(np.uint8)
 
 
+#  读取 QPTIFF 的 DAPI 通道（可选低分辨率层），返回二维 float32 图像
 def _read_dapi_full(path: str, dapi_index0: int, prefer_low_res: bool = True) -> np.ndarray:
-    # 中文：从 QPTIFF 文件读取指定的 DAPI 通道，返回二维浮点图；支持多层级低分辨率选择
+    #  从 QPTIFF 文件读取指定的 DAPI 通道，返回二维浮点图；支持多层级低分辨率选择
     if tifffile is None:
-        # 中文：缺少 tifffile 依赖时直接报错
+        #  缺少 tifffile 依赖时直接报错
         raise RuntimeError("需要安装 tifffile 以读取 QPTIFF")
     with tifffile.TiffFile(path) as tf:  # type: ignore
         s = tf.series[0]
-        # 中文：获取多层级信息（如金字塔各分辨率层），默认优先选择低分辨率层以加速
+        #  获取多层级信息（如金字塔各分辨率层），默认优先选择低分辨率层以加速
         levels = getattr(s, "levels", [s])
         lvl_idx = (len(levels) - 1) if (prefer_low_res and len(levels) > 1) else 0
         lvl = levels[lvl_idx]
-        # 中文：读取该层的轴标记与数据数组
+        #  读取该层的轴标记与数据数组
         axes = getattr(lvl, "axes", "")
         arr = lvl.asarray()
         axes_str = axes if isinstance(axes, str) else ""
-        # 中文：确定通道轴字符（优先 C；有些文件用 S 代表 Sample/Channel）
+        #  确定通道轴字符（优先 C；有些文件用 S 代表 Sample/Channel）
         ch_char = "C" if (axes_str and "C" in axes_str) else ("S" if (axes_str and "S" in axes_str) else None)
         ch_idx = (axes_str.find(ch_char) if ch_char else None)
-        # 中文：若存在通道轴且通道数量>1，则按 dapi_index0 选择该通道
+        #  若存在通道轴且通道数量>1，则按 dapi_index0 选择该通道
         if ch_idx is not None and arr.shape[ch_idx] > 1:
             sel = [slice(None)] * arr.ndim
             sel[ch_idx] = slice(dapi_index0, dapi_index0 + 1)
             sub = np.asarray(arr[tuple(sel)])
             sub = np.squeeze(sub)
         elif arr.ndim == 3:
-            # 中文：三维数组但未标注通道轴时，按最后一维选择
+            #  三维数组但未标注通道轴时，按最后一维选择
             sub = np.asarray(arr[..., dapi_index0])
         else:
-            # 中文：否则直接使用该层数据
+            #  否则直接使用该层数据
             sub = np.asarray(arr)
-        # 中文：确保输出为二维数组
+        #  确保输出为二维数组
         if sub.ndim != 2:
             sub = np.squeeze(sub)
-        # 中文：统一为 float32 便于后续计算
+        #  统一为 float32 便于后续计算
         return sub.astype(np.float32)
 
 
@@ -103,6 +105,7 @@ def _read_dapi_full(path: str, dapi_index0: int, prefer_low_res: bool = True) ->
 class SegmentationStep:
     name: str = "segmentation"
 
+    #  执行分割流程：解析输入与配置，运行 Cellpose，保存 tiles/掩码，并汇总核质心
     def run(self, context: Dict[str, Any]) -> Dict[str, Any]:
         image_path, out_dir, dapi, cp_model = _prepare_and_load(context)
         mask_dir, raw_dir = _prepare_output_dirs(out_dir)
@@ -124,6 +127,7 @@ class SegmentationStep:
         }
 
 
+#  准备输入路径与输出目录；选择 DAPI 通道；初始化 Cellpose 模型
 def _prepare_and_load(context: Dict[str, Any]):
     image_path = context.get("image_path") or context.get("input_path")
     if image_path and os.path.isdir(image_path):
@@ -181,6 +185,7 @@ def _prepare_and_load(context: Dict[str, Any]):
     return image_path, out_dir, dapi, cp_model
 
 
+#  创建分割结果子目录（原始 tile 与掩码 tile）
 def _prepare_output_dirs(out_dir: str):
     raw_dir = os.path.join(out_dir, "raw_tiles")
     mask_dir = os.path.join(out_dir, "mask_tiles")
@@ -189,6 +194,7 @@ def _prepare_output_dirs(out_dir: str):
     return mask_dir, raw_dir
 
 
+#  按 tiles 运行 Cellpose 分割，保存可视化，并记录每个核的质心坐标
 def _segment_tiles_and_save(dapi: np.ndarray, cp_model, context: Dict[str, Any], raw_dir: str, mask_dir: str):
     tile_size = int(context.get("tile_size", 1024))
     H, W = dapi.shape
@@ -235,6 +241,7 @@ def _segment_tiles_and_save(dapi: np.ndarray, cp_model, context: Dict[str, Any],
             props = measure.regionprops(lb)
             for p in props:
                 cy, cx = p.centroid
+                #  记录每个核的质心坐标（global_* 为全图坐标；tile_* 为 tile 左上角；local_* 为 tile 内坐标）
                 all_centroids.append({
                     "global_x": float(x0 + cx),
                     "global_y": float(y0 + cy),
@@ -251,6 +258,7 @@ def _segment_tiles_and_save(dapi: np.ndarray, cp_model, context: Dict[str, Any],
     return {"centroids": all_centroids, "count": total_count, "tiles": len(rects)}
 
 
+#  将每个核的质心坐标写出为 CSV 文件（列：global_x/global_y/tile_x/tile_y/local_x/local_y）
 def _write_centroids_csv(out_dir: str, centroids: list[dict]):
     cent_path = os.path.join(out_dir, "nuclei_centroids.csv")
     with open(cent_path, "w", newline="", encoding="utf-8") as f:

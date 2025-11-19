@@ -28,10 +28,10 @@ class ChannelSpec:
 CHANNEL_CONFIGS: Dict[str, List[ChannelSpec]] = {
     "KidneyCancer": [
         ChannelSpec(1, "DAPI", "-", "核染色", is_dapi=True),
-        ChannelSpec(2, "Opal480", "CD20", "细胞质"),
+        ChannelSpec(2, "Opal480", "CD20", "细胞膜"),
         ChannelSpec(3, "Opal520", "CD3", "细胞膜"),
         ChannelSpec(4, "Opal570", "FOXP3", "细胞核"),
-        ChannelSpec(5, "Opal620", "CD23", "细胞核"),
+        ChannelSpec(5, "Opal620", "CD23", "细胞膜"),
         ChannelSpec(6, "Opal690", "CD8", "细胞膜"),
         ChannelSpec(7, "Opal780", "PAX8s", "细胞核"),
         ChannelSpec(8, "SampleAF", "AF", "细胞自发荧光（背景）", is_af=True),
