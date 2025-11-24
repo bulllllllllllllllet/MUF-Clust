@@ -10,3 +10,9 @@ PYTHONPATH=src python -m muf_clust.api.cli \
 
 只处理单tile
  PYTHONPATH=src python -m muf_clust.api.cli --run segmentation --dataset_dir /nfs5/yj/MIHC/dataset/KidneyCancer/NO2/11/Scan1/11_Scan1.qptiff --cancer_type KidneyCancer  --output_dir /home/zhaoyh/MUF-Clust/outputs --tile_size 1024  --only_tile_x 18432 --only_tile_y 12288 
+ 
+特征提取、多线程计算。
+ PYTHONPATH=src python -m muf_clust.api.cli --run features --image_path /nfs5/yj/MIHC/dataset/KidneyCancer/NO2/11/Scan1/11_Scan1.qptiff --seg_out_dir /home/zhaoyh/MUF-Clust/outputs/segmentation/11_Scan1 --cancer_type KidneyCancer --high_res --num_workers 8
+
+文件夹递归查询
+ (muf-clust) zhaoyh@amax:~/MUF-Clust$ PYTHONPATH=src python -m muf_clust.api.cli --run segmentation  --dataset_dir /nfs5/yj/MIHC/dataset/KidneyCancer  --output_dir /nfs6/zyh/muf-clust/kidneyCancer --num_workers 32

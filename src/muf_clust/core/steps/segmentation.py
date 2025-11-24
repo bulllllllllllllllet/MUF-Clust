@@ -6,8 +6,9 @@ import os
 from dataclasses import dataclass
 from typing import Dict, Any, List, Tuple
 import numpy as np
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from ...utils.logging import log_info, log_error
+from ...utils.logging import log_info, log_error, log_warn
 from ...utils.paths import ensure_dir
 from ...config import get_config, DEFAULT_CANCER_TYPE
 
@@ -49,7 +50,7 @@ from .preprocess import read_qptiff_stack, list_images, tile_iter
 # - 依赖项均按“可选导入”处理，缺失库时会提供中文错误提示并终止。
 
 
-# 中文：DAPI-only 细胞区域识别的常量（近似扩张系数与最近邻限制系数）
+# DAPI-only 细胞区域识别的常量（近似扩张系数与最近邻限制系数）
 ROI_SCALE = 1.8
 ROI_NEAREST_LIMIT = 0.6
 
@@ -110,27 +111,78 @@ def _read_dapi_full(path: str, dapi_index0: int, prefer_low_res: bool = True) ->
 class SegmentationStep:
     name: str = "segmentation"
 
-    #  执行分割流程：解析输入与配置，运行 Cellpose，保存 tiles/掩码，并汇总核质心
+    #  执行分割流程（支持单图与文件夹模式）。
     def run(self, context: Dict[str, Any]) -> Dict[str, Any]:
-        image_path, out_dir, dapi, cp_model = _prepare_and_load(context)
-        mask_dir, raw_dir, roi_dir = _prepare_output_dirs(out_dir)
-        stats = _segment_tiles_and_save(dapi, cp_model, context, raw_dir, mask_dir, roi_dir)
-        cent_path = _write_centroids_csv(out_dir, stats["centroids"]) if stats["centroids"] else os.path.join(out_dir, "nuclei_centroids.csv")
-        log_info(f"分割完成，核数量：{stats['count']}，tiles={stats['tiles']}")
-        return {
-            "segmentation": {
-                "status": "ok",
-                "out_dir": out_dir,
-                "count": stats["count"],
-                "tiles": stats["tiles"],
-                "paths": {
-                    "raw_tiles_dir": raw_dir,
-                    "mask_tiles_dir": mask_dir,
-                    "roi_tiles_dir": roi_dir,
-                    "centroids_csv": cent_path,
-                },
+        dataset_dir = context.get("dataset_dir")
+        input_path = context.get("input_path")
+        folder_mode = bool(context.get("folder_mode", False))
+        is_dir = bool(dataset_dir) or (bool(input_path) and os.path.isdir(str(input_path)))
+
+        if folder_mode and is_dir:
+            base_dir = dataset_dir or str(input_path)
+            images = list_images(base_dir)
+            if not images:
+                log_error("文件夹模式：未找到 qptiff/tiff 图像")
+                raise RuntimeError("未发现可分割的图像文件")
+            output_root = context.get("output_dir", "outputs")
+            seg_root = os.path.join(output_root, "segmentation")
+            ensure_dir(seg_root)
+            log_info(f"文件夹模式：发现 {len(images)} 个图像，输出根目录：{seg_root}")
+            total_cells = 0
+            total_tiles = 0
+            failed: List[str] = []
+            for idx, img in enumerate(images, 1):
+                log_info(f"[{idx}/{len(images)}] 处理 {img}")
+                ctx2 = dict(context)
+                ctx2["image_path"] = img
+                ctx2["dataset_dir"] = None
+                ctx2["only_roi_tiles"] = True
+                try:
+                    image_path, out_dir, dapi, cp_model = _prepare_and_load(ctx2)
+                    mask_dir, raw_dir, roi_dir = _prepare_output_dirs(out_dir, only_roi=True)
+                    stats = _segment_tiles_and_save(dapi, cp_model, ctx2, raw_dir, mask_dir, roi_dir)
+                    cent_path = _write_centroids_csv(out_dir, stats["centroids"]) if stats["centroids"] else os.path.join(out_dir, "nuclei_centroids.csv")
+                    total_cells += stats["count"]
+                    total_tiles += stats["tiles"]
+                    sample_name = os.path.splitext(os.path.basename(img))[0]
+                    log_info(f"=== 图像分割完成 ===\n样本：{sample_name}\n输出目录：{out_dir}\nROI目录：{os.path.join(out_dir, 'roi_tiles')}\n核数量：{stats['count']}，tiles：{stats['tiles']}")
+                except Exception as e:
+                    log_error(f"处理失败：{img}，错误：{e}")
+                    failed.append(img)
+                    continue
+            return {
+                "segmentation": {
+                    "status": "ok",
+                    "mode": "folder",
+                    "out_dir": seg_root,
+                    "count": total_cells,
+                    "tiles": total_tiles,
+                    "images": len(images),
+                    "failed": failed,
+                    "paths": {"root": seg_root},
+                }
             }
-        }
+        else:
+            image_path, out_dir, dapi, cp_model = _prepare_and_load(context)
+            only_roi = bool(context.get("only_roi_tiles", False))
+            mask_dir, raw_dir, roi_dir = _prepare_output_dirs(out_dir, only_roi=only_roi)
+            stats = _segment_tiles_and_save(dapi, cp_model, context, raw_dir, mask_dir, roi_dir)
+            cent_path = _write_centroids_csv(out_dir, stats["centroids"]) if stats["centroids"] else os.path.join(out_dir, "nuclei_centroids.csv")
+            log_info(f"分割完成，核数量：{stats['count']}，tiles={stats['tiles']}")
+            return {
+                "segmentation": {
+                    "status": "ok",
+                    "out_dir": out_dir,
+                    "count": stats["count"],
+                    "tiles": stats["tiles"],
+                    "paths": {
+                        "raw_tiles_dir": raw_dir,
+                        "mask_tiles_dir": mask_dir,
+                        "roi_tiles_dir": roi_dir,
+                        "centroids_csv": cent_path,
+                    },
+                }
+            }
 
 
 #  准备输入路径与输出目录；选择 DAPI 通道；初始化 Cellpose 模型
@@ -218,13 +270,15 @@ def _prepare_and_load(context: Dict[str, Any]):
 
 
 #  创建分割结果子目录（原始 tile、核掩码、细胞ROI掩码）
-def _prepare_output_dirs(out_dir: str):
+def _prepare_output_dirs(out_dir: str, only_roi: bool):
+    roi_dir = os.path.join(out_dir, "roi_tiles")
+    ensure_dir(roi_dir)
+    if only_roi:
+        return None, None, roi_dir
     raw_dir = os.path.join(out_dir, "raw_tiles")
     mask_dir = os.path.join(out_dir, "mask_tiles")
-    roi_dir = os.path.join(out_dir, "roi_tiles")
     ensure_dir(raw_dir)
     ensure_dir(mask_dir)
-    ensure_dir(roi_dir)
     return mask_dir, raw_dir, roi_dir
 
 
@@ -241,7 +295,7 @@ def _segment_tiles_and_save(dapi: np.ndarray, cp_model, context: Dict[str, Any],
         rects = tile_iter(H, W, tile_size)
         base_x0 = 0
         base_y0 = 0
-    # 中文：窗口模式下已按指定偏移生成单一 rect，无需再按 only_tile 过滤；整图模式才执行过滤
+    # 窗口模式下已按指定偏移生成单一 rect，无需再按 only_tile 过滤；整图模式才执行过滤
     only_x = context.get("only_tile_x")
     only_y = context.get("only_tile_y")
     if (only_x is not None or only_y is not None) and (not window_mode):
@@ -249,82 +303,156 @@ def _segment_tiles_and_save(dapi: np.ndarray, cp_model, context: Dict[str, Any],
     log_info(f"开始按tiles处理：尺寸 {H}x{W}，tile_size={tile_size}，总计 {len(rects)} tiles")
     all_centroids = []
     total_count = 0
-    for idx, (y0, x0, h, w) in enumerate(rects, 1):
-        log_info(f"[{idx}/{len(rects)}] 开始处理 tile (x={x0}, y={y0}, h={h}, w={w})")
-        dp = dapi[y0:y0+h, x0:x0+w]
-        try:
-            diam = context.get("cellpose_diameter", None)
-            bsz = context.get("cellpose_batch_size", None)
-            if bsz is not None and hasattr(cp_model, "batch_size"):
-                try:
-                    setattr(cp_model, "batch_size", int(bsz))
-                except Exception:
-                    pass
-            res = cp_model.eval(dp, channels=[0, 0], diameter=diam)  # type: ignore
-            masks = res[0] if isinstance(res, (list, tuple)) else res
-            lb = np.asarray(masks, dtype=np.int32)
-        except Exception as e:
-            log_error(f"Cellpose 分割失败：{e}")
-            raise
-        if cv2 is not None:
-            cv2.imwrite(os.path.join(raw_dir, f"raw_{base_x0 + x0}_{base_y0 + y0}.png"), _to_uint8(dapi[y0:y0+h, x0:x0+w]))
-            cv2.imwrite(os.path.join(mask_dir, f"mask_{base_x0 + x0}_{base_y0 + y0}.png"), ((lb > 0).astype(np.uint8)) * 255)
-        elif plt is not None:
-            fig_raw = plt.figure(figsize=(5, 5))
-            plt.imshow(_to_uint8(dapi[y0:y0+h, x0:x0+w]), cmap="gray")
-            plt.axis("off")
-            fig_raw.savefig(os.path.join(raw_dir, f"raw_{base_x0 + x0}_{base_y0 + y0}.png"), dpi=150)
-            plt.close(fig_raw)
-            fig_mask = plt.figure(figsize=(5, 5))
-            plt.imshow((lb > 0).astype(np.uint8), cmap="gray")
-            plt.axis("off")
-            fig_mask.savefig(os.path.join(mask_dir, f"mask_{base_x0 + x0}_{base_y0 + y0}.png"), dpi=150)
-            plt.close(fig_mask)
-        if measure is not None:
-            props = measure.regionprops(lb)
-            for p in props:
-                cy, cx = p.centroid
-                #  记录每个核的质心坐标（global_* 为全图坐标；tile_* 为 tile 左上角；local_* 为 tile 内坐标）
-                all_centroids.append({
-                    "global_x": float(base_x0 + x0 + cx),
-                    "global_y": float(base_y0 + y0 + cy),
-                    "tile_x": int(x0),
-                    "tile_y": int(y0),
-                    "local_x": float(cx),
-                    "local_y": float(cy),
-                })
-            # 中文：基于 DAPI 的核属性构造细胞 ROI（圆盘近似 + Voronoi 冲突分配）
-            roi_lb = _build_cell_roi_from_props(props, h, w)
-            # 中文：保存 ROI 掩码（二值）与标签图（保留每个细胞的唯一标签）
+    num_workers = int(context.get("num_workers", 1))
+    if num_workers > 1:
+        log_info(f"并行分割：workers={num_workers}")
+        def _process_one(idx: int, y0: int, x0: int, h: int, w: int):
+            dp = dapi[y0:y0+h, x0:x0+w]
+            try:
+                diam = context.get("cellpose_diameter", None)
+                bsz = context.get("cellpose_batch_size", None)
+                if bsz is not None and hasattr(cp_model, "batch_size"):
+                    try:
+                        setattr(cp_model, "batch_size", int(bsz))
+                    except Exception:
+                        pass
+                res = cp_model.eval(dp, channels=[0, 0], diameter=diam)  # type: ignore
+                masks = res[0] if isinstance(res, (list, tuple)) else res
+                lb = np.asarray(masks, dtype=np.int32)
+            except Exception as e:
+                log_error(f"Cellpose 分割失败：{e}")
+                raise
             if cv2 is not None:
-                cv2.imwrite(os.path.join(roi_dir, f"roi_{base_x0 + x0}_{base_y0 + y0}.png"), ((roi_lb > 0).astype(np.uint8)) * 255)
-                cv2.imwrite(os.path.join(roi_dir, f"roi_label_{base_x0 + x0}_{base_y0 + y0}.png"), roi_lb.astype(np.uint16))
-                # 中文：额外输出彩色可视化版本，便于查看不同标签
-                try:
-                    roi_u8 = np.clip(roi_lb.astype(np.float32), 0, None)
-                    vmax = float(np.max(roi_u8))
-                    if vmax > 0:
-                        roi_u8 = (roi_u8 / vmax * 255.0).astype(np.uint8)
-                    colored = cv2.applyColorMap(roi_u8, cv2.COLORMAP_PARULA)
-                    cv2.imwrite(os.path.join(roi_dir, f"roi_label_colored_{base_x0 + x0}_{base_y0 + y0}.png"), colored)
-                except Exception:
-                    pass
+                if raw_dir is not None:
+                    cv2.imwrite(os.path.join(raw_dir, f"raw_{base_x0 + x0}_{base_y0 + y0}.png"), _to_uint8(dp))
+                if mask_dir is not None:
+                    cv2.imwrite(os.path.join(mask_dir, f"mask_{base_x0 + x0}_{base_y0 + y0}.png"), ((lb > 0).astype(np.uint8)) * 255)
             elif plt is not None:
-                fig_roi = plt.figure(figsize=(5, 5))
-                plt.imshow((roi_lb > 0).astype(np.uint8), cmap="gray")
-                plt.axis("off")
-                fig_roi.savefig(os.path.join(roi_dir, f"roi_{base_x0 + x0}_{base_y0 + y0}.png"), dpi=150)
-                plt.close(fig_roi)
-                fig_roi_lbl = plt.figure(figsize=(5, 5))
-                plt.imshow(roi_lb, cmap="nipy_spectral")
-                plt.axis("off")
-                fig_roi_lbl.savefig(os.path.join(roi_dir, f"roi_label_{base_x0 + x0}_{base_y0 + y0}.png"), dpi=150)
-                plt.close(fig_roi_lbl)
-            detected = len(props)
-        else:
-            detected = int(np.max(lb)) if lb.size > 0 else 0
-        total_count += detected
-        log_info(f"[{idx}/{len(rects)}] 完成 tile (x={x0}, y={y0})，检测核 {detected}")
+                if raw_dir is not None:
+                    fig_raw = plt.figure(figsize=(5, 5)); plt.imshow(_to_uint8(dp), cmap="gray"); plt.axis("off"); fig_raw.savefig(os.path.join(raw_dir, f"raw_{base_x0 + x0}_{base_y0 + y0}.png"), dpi=150); plt.close(fig_raw)
+                if mask_dir is not None:
+                    fig_mask = plt.figure(figsize=(5, 5)); plt.imshow((lb > 0).astype(np.uint8), cmap="gray"); plt.axis("off"); fig_mask.savefig(os.path.join(mask_dir, f"mask_{base_x0 + x0}_{base_y0 + y0}.png"), dpi=150); plt.close(fig_mask)
+            detected = 0
+            cents_local: List[Dict[str, Any]] = []
+            if measure is not None:
+                props = measure.regionprops(lb)
+                for p in props:
+                    cy, cx = p.centroid
+                    cents_local.append({
+                        "global_x": float(base_x0 + x0 + cx),
+                        "global_y": float(base_y0 + y0 + cy),
+                        "tile_x": int(x0),
+                        "tile_y": int(y0),
+                        "local_x": float(cx),
+                        "local_y": float(cy),
+                    })
+                roi_lb = _build_cell_roi_from_props(props, h, w)
+                if cv2 is not None:
+                    cv2.imwrite(os.path.join(roi_dir, f"roi_{base_x0 + x0}_{base_y0 + y0}.png"), ((roi_lb > 0).astype(np.uint8)) * 255)
+                    cv2.imwrite(os.path.join(roi_dir, f"roi_label_{base_x0 + x0}_{base_y0 + y0}.png"), roi_lb.astype(np.uint16))
+                    try:
+                        roi_u8 = np.clip(roi_lb.astype(np.float32), 0, None)
+                        vmax = float(np.max(roi_u8))
+                        if vmax > 0:
+                            roi_u8 = (roi_u8 / vmax * 255.0).astype(np.uint8)
+                        colored = cv2.applyColorMap(roi_u8, cv2.COLORMAP_PARULA)
+                        cv2.imwrite(os.path.join(roi_dir, f"roi_label_colored_{base_x0 + x0}_{base_y0 + y0}.png"), colored)
+                    except Exception:
+                        pass
+                elif plt is not None:
+                    fig_roi = plt.figure(figsize=(5, 5)); plt.imshow((roi_lb > 0).astype(np.uint8), cmap="gray"); plt.axis("off"); fig_roi.savefig(os.path.join(roi_dir, f"roi_{base_x0 + x0}_{base_y0 + y0}.png"), dpi=150); plt.close(fig_roi)
+                    fig_roi_lbl = plt.figure(figsize=(5, 5)); plt.imshow(roi_lb, cmap="nipy_spectral"); plt.axis("off"); fig_roi_lbl.savefig(os.path.join(roi_dir, f"roi_label_{base_x0 + x0}_{base_y0 + y0}.png"), dpi=150); plt.close(fig_roi_lbl)
+                detected = len(props)
+            else:
+                detected = int(np.max(lb)) if lb.size > 0 else 0
+            return idx, y0, x0, detected, cents_local
+        with ThreadPoolExecutor(max_workers=num_workers) as ex:
+            fut_map = {}
+            for idx, (y0, x0, h, w) in enumerate(rects, 1):
+                fut = ex.submit(_process_one, idx, y0, x0, h, w)
+                fut_map[fut] = (idx, y0, x0)
+            for fut in as_completed(fut_map):
+                idx, y0, x0, detected, cents_local = fut.result()
+                total_count += detected
+                all_centroids.extend(cents_local)
+                log_info(f"[{idx}/{len(rects)}] 完成 tile (x={x0}, y={y0})，检测核 {detected}")
+    else:
+        for idx, (y0, x0, h, w) in enumerate(rects, 1):
+            log_info(f"[{idx}/{len(rects)}] 开始处理 tile (x={x0}, y={y0}, h={h}, w={w})")
+            dp = dapi[y0:y0+h, x0:x0+w]
+            try:
+                diam = context.get("cellpose_diameter", None)
+                bsz = context.get("cellpose_batch_size", None)
+                if bsz is not None and hasattr(cp_model, "batch_size"):
+                    try:
+                        setattr(cp_model, "batch_size", int(bsz))
+                    except Exception:
+                        pass
+                res = cp_model.eval(dp, channels=[0, 0], diameter=diam)  # type: ignore
+                masks = res[0] if isinstance(res, (list, tuple)) else res
+                lb = np.asarray(masks, dtype=np.int32)
+            except Exception as e:
+                log_error(f"Cellpose 分割失败：{e}")
+                raise
+            if cv2 is not None:
+                if raw_dir is not None:
+                    cv2.imwrite(os.path.join(raw_dir, f"raw_{base_x0 + x0}_{base_y0 + y0}.png"), _to_uint8(dapi[y0:y0+h, x0:x0+w]))
+                if mask_dir is not None:
+                    cv2.imwrite(os.path.join(mask_dir, f"mask_{base_x0 + x0}_{base_y0 + y0}.png"), ((lb > 0).astype(np.uint8)) * 255)
+            elif plt is not None:
+                if raw_dir is not None:
+                    fig_raw = plt.figure(figsize=(5, 5))
+                    plt.imshow(_to_uint8(dapi[y0:y0+h, x0:x0+w]), cmap="gray")
+                    plt.axis("off")
+                    fig_raw.savefig(os.path.join(raw_dir, f"raw_{base_x0 + x0}_{base_y0 + y0}.png"), dpi=150)
+                    plt.close(fig_raw)
+                if mask_dir is not None:
+                    fig_mask = plt.figure(figsize=(5, 5))
+                    plt.imshow((lb > 0).astype(np.uint8), cmap="gray")
+                    plt.axis("off")
+                    fig_mask.savefig(os.path.join(mask_dir, f"mask_{base_x0 + x0}_{base_y0 + y0}.png"), dpi=150)
+                    plt.close(fig_mask)
+            if measure is not None:
+                props = measure.regionprops(lb)
+                for p in props:
+                    cy, cx = p.centroid
+                    all_centroids.append({
+                        "global_x": float(base_x0 + x0 + cx),
+                        "global_y": float(base_y0 + y0 + cy),
+                        "tile_x": int(x0),
+                        "tile_y": int(y0),
+                        "local_x": float(cx),
+                        "local_y": float(cy),
+                    })
+                roi_lb = _build_cell_roi_from_props(props, h, w)
+                if cv2 is not None:
+                    cv2.imwrite(os.path.join(roi_dir, f"roi_{base_x0 + x0}_{base_y0 + y0}.png"), ((roi_lb > 0).astype(np.uint8)) * 255)
+                    cv2.imwrite(os.path.join(roi_dir, f"roi_label_{base_x0 + x0}_{base_y0 + y0}.png"), roi_lb.astype(np.uint16))
+                    try:
+                        roi_u8 = np.clip(roi_lb.astype(np.float32), 0, None)
+                        vmax = float(np.max(roi_u8))
+                        if vmax > 0:
+                            roi_u8 = (roi_u8 / vmax * 255.0).astype(np.uint8)
+                        colored = cv2.applyColorMap(roi_u8, cv2.COLORMAP_PARULA)
+                        cv2.imwrite(os.path.join(roi_dir, f"roi_label_colored_{base_x0 + x0}_{base_y0 + y0}.png"), colored)
+                    except Exception:
+                        pass
+                elif plt is not None:
+                    fig_roi = plt.figure(figsize=(5, 5))
+                    plt.imshow((roi_lb > 0).astype(np.uint8), cmap="gray")
+                    plt.axis("off")
+                    fig_roi.savefig(os.path.join(roi_dir, f"roi_{base_x0 + x0}_{base_y0 + y0}.png"), dpi=150)
+                    plt.close(fig_roi)
+                    fig_roi_lbl = plt.figure(figsize=(5, 5))
+                    plt.imshow(roi_lb, cmap="nipy_spectral")
+                    plt.axis("off")
+                    fig_roi_lbl.savefig(os.path.join(roi_dir, f"roi_label_{base_x0 + x0}_{base_y0 + y0}.png"), dpi=150)
+                    plt.close(fig_roi_lbl)
+                detected = len(props)
+            else:
+                detected = int(np.max(lb)) if lb.size > 0 else 0
+            total_count += detected
+            log_info(f"[{idx}/{len(rects)}] 完成 tile (x={x0}, y={y0})，检测核 {detected}")
     return {"centroids": all_centroids, "count": total_count, "tiles": len(rects)}
 
 
@@ -337,7 +465,6 @@ def _write_centroids_csv(out_dir: str, centroids: list[dict]):
         for it in centroids:
             wtr.writerow(it)
     return cent_path
-
 
 # 根据核的形态属性生成细胞 ROI（DAPI-only）：
 # 1) 估计每个核的等效半径 r_nuc = sqrt(area/pi)
@@ -400,7 +527,7 @@ def _build_cell_roi_from_props(props: List[Any], h: int, w: int) -> np.ndarray:
             assign_dist2[better] = d2[better]
     return assign_label.astype(np.int32)
 
-# 中文：窗口化读取 DAPI 通道的指定区域（仅加载目标 tile 对应的切片），返回二维 float32 图像
+# 窗口化读取 DAPI 通道的指定区域（仅加载目标 tile 对应的切片），返回二维 float32 图像
 def _read_dapi_window(path: str, dapi_index0: int, x0: int, y0: int, w: int, h: int, prefer_low_res: bool = False) -> np.ndarray:
     if tifffile is None:
         raise RuntimeError("需要安装 tifffile 以窗口化读取 QPTIFF")

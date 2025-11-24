@@ -4,3 +4,4 @@ __pycache__/
 outputs/
 src/*.egg-info/
 .venv/
+out_wholeWSI

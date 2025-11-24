@@ -53,6 +53,39 @@ def run_preprocess(image_path: Optional[str] = None,
     return result
 
 
+def run_features(image_path: str,
+                 seg_out_dir: str,
+                 roi_tiles_dir: str,
+                 options: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """仅执行特征提取步骤。
+
+    中文说明：
+    - 基于已有分割输出（ROI标签 tiles）进行强度特征汇总。
+    - 需提供原始影像路径、分割输出目录与 ROI tiles 目录。
+    """
+    log_info(f"开始特征提取（features-only）：image_path={image_path} seg_out_dir={seg_out_dir}")
+
+    steps: list[Step] = []
+    from ..core.steps.features import FeatureStep
+    steps.append(FeatureStep())
+
+    pipeline = Pipeline(steps=steps)
+    context = {
+        "image_path": image_path,
+        "segmentation": {
+            "out_dir": seg_out_dir,
+            "paths": {"roi_tiles_dir": roi_tiles_dir},
+        },
+        "prefer_low_res": bool((options or {}).get("prefer_low_res", False)),
+        "cancer_type": (options or {}).get("cancer_type"),
+        "only_tile_x": (options or {}).get("only_tile_x"),
+        "only_tile_y": (options or {}).get("only_tile_y"),
+        "num_workers": int((options or {}).get("num_workers", 1)),
+    }
+    result = pipeline.run(context)
+    return result
+
+
 def run_full_pipeline(input_path: str,
                       output_dir: str = "outputs",
                       config_path: Optional[str] = None,
@@ -76,13 +109,13 @@ def run_full_pipeline(input_path: str,
         steps.append(PreprocessStepSkeleton(qc_level=options.get("qc", "basic") if options else "basic",
                                             seed=seed, options=options or {}))
 
-    # 分割→特征→聚类→可视化（分割已实现，其余保持骨架）
+    # 分割→特征→聚类→可视化（分割与特征已实现，其余保持骨架）
     try:
         from ..core.steps.segmentation import SegmentationStep
-        from ..core.steps.features import FeatureStepSkeleton
+        from ..core.steps.features import FeatureStep
         from ..core.steps.cluster import ClusterStepSkeleton
         from ..core.steps.visualize import VisualizeStepSkeleton
-        steps += [SegmentationStep(), FeatureStepSkeleton(), ClusterStepSkeleton(), VisualizeStepSkeleton()]
+        steps += [SegmentationStep(), FeatureStep(), ClusterStepSkeleton(), VisualizeStepSkeleton()]
     except Exception:
         pass
 
@@ -155,6 +188,9 @@ def run_segmentation(input_path: str,
         "cellpose_batch_size": (options or {}).get("cellpose_batch_size"),
         "only_tile_x": (options or {}).get("only_tile_x"),
         "only_tile_y": (options or {}).get("only_tile_y"),
+        "num_workers": int((options or {}).get("num_workers", 1)),
+        "folder_mode": bool(is_dir),
+        "only_roi_tiles": bool(is_dir),
     }
     result = pipeline.run(context)
     return result

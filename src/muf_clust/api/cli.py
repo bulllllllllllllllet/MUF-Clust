@@ -2,7 +2,7 @@ import argparse
 import sys
 
 from ..config import get_runtime_defaults, DEFAULT_CANCER_TYPE
-from .pipeline_api import run_preprocess, run_full_pipeline, run_segmentation
+from .pipeline_api import run_preprocess, run_full_pipeline, run_segmentation, run_features
 from ..utils.logging import log_info, log_warn, log_error
 
 
@@ -24,7 +24,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--only_tile_y", type=int, default=None, help="仅处理指定tile的y坐标")
     p.add_argument("--cellpose_diameter", type=float, default=None, help="Cellpose分割直径（像素，提供可显著加速）")
     p.add_argument("--cellpose_batch_size", type=int, default=None, help="Cellpose推理批大小（默认由库决定，如8）")
-    p.add_argument("--run", choices=["preprocess", "segmentation", "full"], default="preprocess", help="运行模式：仅预处理、仅分割或完整管线")
+    p.add_argument("--seg_out_dir", required=False, help="分割输出目录（features-only）")
+    p.add_argument("--roi_tiles_dir", required=False, help="ROI标签tiles目录（features-only）")
+    p.add_argument("--num_workers", type=int, default=1, help="并行处理的workers数量（分割与特征均生效，>=1）")
+    p.add_argument("--run", choices=["preprocess", "segmentation", "features", "full"], default="preprocess", help="运行模式：仅预处理、仅分割、仅特征或完整管线")
     return p.parse_args()
 
 
@@ -61,12 +64,29 @@ def main():
             result = run_segmentation(
                 input_path=input_path,
                 output_dir=args.output_dir,
-                options={"cancer_type": args.cancer_type, "high_res": bool(getattr(args, "high_res", False)), "tile_size": args.tile_size, "cellpose_model": args.cellpose_model, "cellpose_gpu": args.cellpose_gpu, "cellpose_diameter": args.cellpose_diameter, "cellpose_batch_size": args.cellpose_batch_size, "only_tile_x": args.only_tile_x, "only_tile_y": args.only_tile_y},
+                options={"cancer_type": args.cancer_type, "high_res": bool(getattr(args, "high_res", False)), "tile_size": args.tile_size, "cellpose_model": args.cellpose_model, "cellpose_gpu": args.cellpose_gpu, "cellpose_diameter": args.cellpose_diameter, "cellpose_batch_size": args.cellpose_batch_size, "only_tile_x": args.only_tile_x, "only_tile_y": args.only_tile_y, "num_workers": args.num_workers},
             )
             seg = result.get("segmentation", {})
             out_dir = seg.get("out_dir", args.output_dir)
             log_info("分割步骤执行完成")
             log_info(f"分割输出：{out_dir}")
+        elif args.run == "features":
+            if not args.seg_out_dir:
+                log_error("缺少分割输出目录 seg_out_dir")
+                sys.exit(2)
+            roi_dir = args.roi_tiles_dir or (args.seg_out_dir.rstrip("/") + "/roi_tiles")
+            result = run_features(
+                image_path=args.image_path,
+                seg_out_dir=args.seg_out_dir,
+                roi_tiles_dir=roi_dir,
+                options={"cancer_type": args.cancer_type, "prefer_low_res": not bool(getattr(args, "high_res", False)), "only_tile_x": args.only_tile_x, "only_tile_y": args.only_tile_y, "num_workers": args.num_workers},
+            )
+            feats = result.get("features", {})
+            log_info("特征步骤执行完成")
+            log_info(f"特征输出目录：{feats.get('features_dir')}")
+            log_info(f"长表CSV：{feats.get('features_long_csv')}")
+            log_info(f"矩阵CSV：{feats.get('features_matrix_csv')}")
+            log_info(f"细胞数：{feats.get('cells')}")
         else:
             input_path = args.image_path or args.dataset_dir
             result = run_full_pipeline(
