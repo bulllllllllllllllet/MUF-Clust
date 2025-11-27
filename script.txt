@@ -20,3 +20,12 @@ PYTHONPATH=src python -m muf_clust.api.cli --run segmentation  --dataset_dir /nf
 @features.py特征提取部分也可以设置一个文件夹模式吗，和 @segmentation.py 类似，输入的原始图片路径以及roi图片路径都是一个文件夹的格式。需要根据文件名做到自动匹配。例如我会输入一个PYTHONPATH=src python -m muf_clust.api.cli --run features--dataset_dir /nfs5/yj/MIHC/dataset/KidneyCancer  --seg_out_dir /nfs6/zyh/muf-clust/kidneyCancer/seg_roi_res/segmentation --num_workers 32
 你可以用命令行看一下/nfs6/zyh/muf-clust/kidneyCancer/seg_roi_res/segmentation
 和/nfs5/yj/MIHC/dataset/KidneyCancer 这两个文件夹中的文件名是可以匹配上的。然后实现一个文件夹递归特征匹配的功能。同时也需要添加已经特征提取即跳过的功能（和segmentation中的类似）。
+
+
+  uv run muf-clust --run segmentation \
+  --dataset_dir /nfs5/yj/MIHC/dataset/KidneyCancer/NO2/11/Scan1/11_Scan1.qptiff \
+  --cancer_type KidneyCancer \
+  --output_dir /nfs5/zyh/MUF-Clust/outputs \
+  --tile_size 1024 \
+  --only_tile_x 18432 \
+  --only_tile_y 12288

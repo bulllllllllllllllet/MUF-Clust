@@ -1,0 +1,25 @@
+[project]
+name = "muf-clust"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy==2.2.6",
+  "tifffile==2025.5.10",
+  "scikit-image==0.25.2",
+  "opencv-python",
+  "matplotlib==3.10.7",
+  "seaborn==0.13.2",
+  "openslide-python==1.4.2",
+  "imagecodecs==2025.3.30",
+  "cellpose==4.0.7",
+  "scipy==1.15.2",
+  "pillow==12.0.0",
+  "pandas==2.3.3",
+  "networkx==3.4.2",
+  "zarr==2.18.3",
+]
+
+[project.scripts]
+muf-clust = "muf_clust.api.cli:main"
