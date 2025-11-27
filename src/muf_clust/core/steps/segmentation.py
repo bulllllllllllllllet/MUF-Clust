@@ -132,6 +132,18 @@ class SegmentationStep:
             total_tiles = 0
             failed: List[str] = []
             for idx, img in enumerate(images, 1):
+                sample_name = os.path.splitext(os.path.basename(img))[0]
+                out_dir = os.path.join(seg_root, sample_name)
+                roi_dir = os.path.join(out_dir, "roi_tiles")
+                cent_csv = os.path.join(out_dir, "nuclei_centroids.csv")
+                if os.path.isdir(roi_dir) and os.path.isfile(cent_csv):
+                    try:
+                        has_roi = any((fn.startswith("roi_") or fn.startswith("roi_label_")) for fn in os.listdir(roi_dir))
+                    except Exception:
+                        has_roi = False
+                    if has_roi:
+                        log_info(f"跳过已完成样本：{sample_name}（检测到 roi_tiles 与 nuclei_centroids.csv）")
+                        continue
                 log_info(f"[{idx}/{len(images)}] 处理 {img}")
                 ctx2 = dict(context)
                 ctx2["image_path"] = img
@@ -144,7 +156,6 @@ class SegmentationStep:
                     cent_path = _write_centroids_csv(out_dir, stats["centroids"]) if stats["centroids"] else os.path.join(out_dir, "nuclei_centroids.csv")
                     total_cells += stats["count"]
                     total_tiles += stats["tiles"]
-                    sample_name = os.path.splitext(os.path.basename(img))[0]
                     log_info(f"=== 图像分割完成 ===\n样本：{sample_name}\n输出目录：{out_dir}\nROI目录：{os.path.join(out_dir, 'roi_tiles')}\n核数量：{stats['count']}，tiles：{stats['tiles']}")
                 except Exception as e:
                     log_error(f"处理失败：{img}，错误：{e}")
