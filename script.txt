@@ -29,3 +29,12 @@ PYTHONPATH=src python -m muf_clust.api.cli --run segmentation  --dataset_dir /nf
   --tile_size 1024 \
   --only_tile_x 18432 \
   --only_tile_y 12288
+
+
+uv run sample_roi_features.py \
+  --roi-root /nfs6/zyh/muf-clust/kidneyCancer/seg_roi_res/segmentation \
+  --dataset-dir /nfs5/yj/MIHC/dataset/KidneyCancer \
+  --output-root /nfs5/zyh/MUF-Clust/outputs \
+  --tiles-per-roi 2 \
+  --num-workers 16 \
+  --high-res

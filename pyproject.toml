@@ -23,3 +23,8 @@ dependencies = [
 
 [project.scripts]
 muf-clust = "muf_clust.api.cli:main"
+
+[dependency-groups]
+dev = [
+    "ipykernel>=7.1.0",
+]

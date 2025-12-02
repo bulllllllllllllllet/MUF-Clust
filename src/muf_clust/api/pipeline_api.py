@@ -10,8 +10,13 @@ from __future__ import annotations
 from typing import Dict, Any, Optional
 import os
 
-from ..utils.logging import log_info
+import numpy as np
+import pandas as pd
+
+from ..utils.logging import log_info, log_warn, log_error
 from ..core.pipeline import Pipeline, Step
+from ..core.steps.preprocess import list_images
+from ..core.steps.cluster import _zscore_matrix, _pca, _kmeans
 
 
 def run_preprocess(image_path: Optional[str] = None,
@@ -86,6 +91,85 @@ def run_features(image_path: str,
     return result
 
 
+def run_features_folder(dataset_dir: str,
+                        seg_root: str,
+                        options: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """文件夹模式执行特征提取。
+
+    中文说明：
+    - 递归遍历 dataset_dir 下的 qptiff/tiff 图像；
+    - 根据图像 basename 匹配 seg_root/<basename>/roi_tiles；
+    - 若检测到已有 features_long.csv 和 features_matrix_mean.csv 则跳过该样本。
+    """
+    log_info(f"开始特征提取（文件夹模式）：dataset_dir={dataset_dir} seg_root={seg_root}")
+
+    from ..core.steps.features import FeatureStep
+
+    images = list_images(dataset_dir)
+    if not images:
+        log_error("文件夹模式：未在 dataset_dir 中找到 qptiff/tiff 图像")
+        raise RuntimeError("未发现可进行特征提取的图像文件")
+
+    total_cells = 0
+    processed = 0
+    failed: list[str] = []
+
+    for idx, img in enumerate(images, 1):
+        sample_name = os.path.splitext(os.path.basename(img))[0]
+        seg_out_dir = os.path.join(seg_root, sample_name)
+        roi_dir = os.path.join(seg_out_dir, "roi_tiles")
+        features_dir = os.path.join(seg_out_dir, "features")
+        long_csv = os.path.join(features_dir, "features_long.csv")
+        matrix_csv = os.path.join(features_dir, "features_matrix_mean.csv")
+
+        if os.path.isdir(features_dir) and os.path.isfile(long_csv) and os.path.isfile(matrix_csv):
+            log_info(f"跳过已完成样本：{sample_name}（检测到 features_long.csv 与 features_matrix_mean.csv）")
+            continue
+
+        if not os.path.isdir(roi_dir):
+            log_warn(f"跳过样本：{sample_name}（缺少 ROI tiles 目录：{roi_dir}）")
+            failed.append(img)
+            continue
+
+        log_info(f"[{idx}/{len(images)}] 特征提取：{img}")
+        steps: list[Step] = [FeatureStep()]
+        pipeline = Pipeline(steps=steps)
+        context = {
+            "image_path": img,
+            "segmentation": {
+                "out_dir": seg_out_dir,
+                "paths": {"roi_tiles_dir": roi_dir},
+            },
+            "prefer_low_res": bool((options or {}).get("prefer_low_res", False)),
+            "cancer_type": (options or {}).get("cancer_type"),
+            "only_tile_x": (options or {}).get("only_tile_x"),
+            "only_tile_y": (options or {}).get("only_tile_y"),
+            "num_workers": int((options or {}).get("num_workers", 1)),
+        }
+        try:
+            res = pipeline.run(context)
+            feats = res.get("features", {})
+            total_cells += int(feats.get("cells", 0))
+            processed += 1
+        except Exception as e:
+            log_error(f"处理失败：{img}，错误：{e}")
+            failed.append(img)
+            continue
+
+    return {
+        "features": {
+            "status": "ok",
+            "mode": "folder",
+            "root": seg_root,
+            "dataset_dir": dataset_dir,
+            "images": len(images),
+            "processed": processed,
+            "cells": total_cells,
+            "failed": failed,
+        }
+    }
+
+
 def run_full_pipeline(input_path: str,
                       output_dir: str = "outputs",
                       config_path: Optional[str] = None,
@@ -143,6 +227,81 @@ def run_full_pipeline(input_path: str,
     }
     result = pipeline.run(context)
     return result
+
+
+def run_cluster_from_csv(matrix_csv: str,
+                         seed: int = 42,
+                         k: Optional[int] = None) -> Dict[str, Any]:
+    """对已有特征矩阵 CSV 执行 Z-score→PCA→KMeans 聚类。
+
+    中文说明：
+    - 读取由 FeatureStep 写出的 features_matrix_mean.csv；
+    - 对通道列做 Z-score 标准化与 PCA 降维；
+    - 在 PCA 空间内运行 KMeans 聚类；
+    - 将 cluster/置信度/PCA 坐标写回新的 *_cluster.csv 文件。
+    """
+    log_info(f"开始基于 CSV 的聚类：matrix_csv={matrix_csv}")
+
+    df = pd.read_csv(matrix_csv)
+    if df.empty or df.shape[0] == 0:
+        log_warn("输入特征矩阵为空，跳过聚类")
+        return {"cluster": {"status": "skipped", "reason": "empty_features", "matrix_csv": matrix_csv}}
+
+    non_feature_cols = [c for c in df.columns if c.lower() in {"cell_id", "tile_x", "tile_y", "label", "x", "y", "centroid_x", "centroid_y", "local_x", "local_y"}]
+    feature_cols = [c for c in df.columns if c not in non_feature_cols]
+    if len(feature_cols) == 0:
+        log_warn("未在 CSV 中找到特征列，跳过聚类")
+        return {"cluster": {"status": "skipped", "reason": "no_feature_columns", "matrix_csv": matrix_csv}}
+
+    x = df[feature_cols].to_numpy(dtype=float)
+    x = np.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+    x_norm = _zscore_matrix(x)
+
+    n_components = min(20, x_norm.shape[0], x_norm.shape[1])
+    scores, explained_ratio = _pca(x_norm, n_components=n_components)
+
+    n_cells = x.shape[0]
+    if k is None:
+        if n_cells < 20:
+            k_val = max(2, min(4, n_cells))
+        elif n_cells < 100:
+            k_val = 6
+        else:
+            k_val = 8
+    else:
+        k_val = int(max(2, min(k, n_cells)))
+
+    labels, centers = _kmeans(scores, k=k_val, n_init=5, max_iter=100, seed=int(seed))
+
+    if centers.size > 0:
+        dists = np.linalg.norm(scores[:, None, :] - centers[None, :, :], axis=2)
+        sorted_d = np.sort(dists, axis=1)
+        d1 = sorted_d[:, 0]
+        d2 = sorted_d[:, 1] if sorted_d.shape[1] > 1 else (sorted_d[:, 0] + 1e-6)
+        confidence = 1.0 - np.clip(d1 / (d2 + 1e-6), 0.0, 1.0)
+    else:
+        confidence = np.ones((n_cells,), dtype=float)
+
+    df["cluster"] = labels.astype(int)
+    df["confidence"] = confidence.astype(float)
+    for i in range(scores.shape[1]):
+        df[f"pca_{i+1}"] = scores[:, i]
+
+    out_csv = matrix_csv.replace(".csv", "_cluster.csv")
+    df.to_csv(out_csv, index=False)
+
+    log_info(f"CSV 聚类完成：cells={n_cells}, k={k_val}, 输入={matrix_csv}, 输出={out_csv}")
+
+    return {
+        "cluster": {
+            "status": "ok",
+            "k": int(k_val),
+            "cells": int(n_cells),
+            "labels_csv": out_csv,
+            "explained_variance_ratio": explained_ratio.tolist(),
+            "matrix_csv": matrix_csv,
+        }
+    }
 
 
 def run_segmentation(input_path: str,

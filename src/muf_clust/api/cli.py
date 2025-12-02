@@ -2,7 +2,7 @@ import argparse
 import sys
 
 from ..config import get_runtime_defaults, DEFAULT_CANCER_TYPE
-from .pipeline_api import run_preprocess, run_full_pipeline, run_segmentation, run_features
+from .pipeline_api import run_preprocess, run_full_pipeline, run_segmentation, run_features, run_features_folder
 from ..utils.logging import log_info, log_warn, log_error
 
 
@@ -34,6 +34,8 @@ def parse_args() -> argparse.Namespace:
 def main():
     args = parse_args()
     defaults = get_runtime_defaults(args.cancer_type)
+    orig_image_path = args.image_path
+    orig_dataset_dir = args.dataset_dir
     args.dataset_dir = args.dataset_dir or defaults.dataset_dir
     args.image_path = args.image_path or defaults.image_path
     args.output_dir = args.output_dir or defaults.output_root
@@ -71,22 +73,49 @@ def main():
             log_info("分割步骤执行完成")
             log_info(f"分割输出：{out_dir}")
         elif args.run == "features":
-            if not args.seg_out_dir:
-                log_error("缺少分割输出目录 seg_out_dir")
-                sys.exit(2)
-            roi_dir = args.roi_tiles_dir or (args.seg_out_dir.rstrip("/") + "/roi_tiles")
-            result = run_features(
-                image_path=args.image_path,
-                seg_out_dir=args.seg_out_dir,
-                roi_tiles_dir=roi_dir,
-                options={"cancer_type": args.cancer_type, "prefer_low_res": not bool(getattr(args, "high_res", False)), "only_tile_x": args.only_tile_x, "only_tile_y": args.only_tile_y, "num_workers": args.num_workers},
-            )
-            feats = result.get("features", {})
-            log_info("特征步骤执行完成")
-            log_info(f"特征输出目录：{feats.get('features_dir')}")
-            log_info(f"长表CSV：{feats.get('features_long_csv')}")
-            log_info(f"矩阵CSV：{feats.get('features_matrix_csv')}")
-            log_info(f"细胞数：{feats.get('cells')}")
+            folder_mode = bool(orig_dataset_dir) and not bool(orig_image_path)
+            if folder_mode:
+                if not args.seg_out_dir:
+                    log_error("缺少分割输出目录 seg_out_dir（文件夹模式）")
+                    sys.exit(2)
+                result = run_features_folder(
+                    dataset_dir=args.dataset_dir,
+                    seg_root=args.seg_out_dir,
+                    options={
+                        "cancer_type": args.cancer_type,
+                        "prefer_low_res": not bool(getattr(args, "high_res", False)),
+                        "only_tile_x": args.only_tile_x,
+                        "only_tile_y": args.only_tile_y,
+                        "num_workers": args.num_workers,
+                    },
+                )
+                feats = result.get("features", {})
+                log_info("特征步骤执行完成（文件夹模式）")
+                log_info(f"seg_root：{feats.get('root')}")
+                log_info(f"数据集目录：{feats.get('dataset_dir')}")
+                log_info(f"总图像数：{feats.get('images')}，实际处理：{feats.get('processed')}，细胞总数：{feats.get('cells')}")
+                failed = feats.get("failed") or []
+                if failed:
+                    log_warn("存在特征提取失败/缺少 ROI 的样本")
+                    for p in failed:
+                        log_warn(f"失败：{p}")
+            else:
+                if not args.seg_out_dir:
+                    log_error("缺少分割输出目录 seg_out_dir")
+                    sys.exit(2)
+                roi_dir = args.roi_tiles_dir or (args.seg_out_dir.rstrip("/") + "/roi_tiles")
+                result = run_features(
+                    image_path=args.image_path,
+                    seg_out_dir=args.seg_out_dir,
+                    roi_tiles_dir=roi_dir,
+                    options={"cancer_type": args.cancer_type, "prefer_low_res": not bool(getattr(args, "high_res", False)), "only_tile_x": args.only_tile_x, "only_tile_y": args.only_tile_y, "num_workers": args.num_workers},
+                )
+                feats = result.get("features", {})
+                log_info("特征步骤执行完成")
+                log_info(f"特征输出目录：{feats.get('features_dir')}")
+                log_info(f"长表CSV：{feats.get('features_long_csv')}")
+                log_info(f"矩阵CSV：{feats.get('features_matrix_csv')}")
+                log_info(f"细胞数：{feats.get('cells')}")
         else:
             input_path = args.image_path or args.dataset_dir
             result = run_full_pipeline(
