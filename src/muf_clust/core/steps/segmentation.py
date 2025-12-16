@@ -104,6 +104,28 @@ def _read_dapi_full(path: str, dapi_index0: int, prefer_low_res: bool = True) ->
         return sub.astype(np.float32)
 
 
+def _get_dapi_shape(path: str, prefer_low_res: bool = True) -> tuple[int, int]:
+    if tifffile is None:
+        raise RuntimeError("需要安装 tifffile 以读取 QPTIFF")
+    with tifffile.TiffFile(path) as tf:  # type: ignore
+        s = tf.series[0]
+        levels = getattr(s, "levels", [s])
+        lvl_idx = (len(levels) - 1) if (prefer_low_res and len(levels) > 1) else 0
+        lvl = levels[lvl_idx]
+        axes = getattr(lvl, "axes", "")
+        shape = lvl.shape
+        axes_str = axes if isinstance(axes, str) else ""
+        if axes_str and ("Y" in axes_str and "X" in axes_str):
+            y_idx = axes_str.find("Y")
+            x_idx = axes_str.find("X")
+            h = int(shape[y_idx])
+            w = int(shape[x_idx])
+        else:
+            h = int(shape[-2])
+            w = int(shape[-1])
+        return h, w
+
+
  
 
 
@@ -217,8 +239,11 @@ def _prepare_and_load(context: Dict[str, Any]):
     log_info(f"准备读取 DAPI 通道（prefer_low_res={prefer_lr}）")
     import time
     t0 = time.time()
+    dapi_h = 0
+    dapi_w = 0
     try:
         dapi_idx = next(((c.index - 1) for c in cfgs if c.is_dapi), 0)
+        context["dapi_index0"] = int(dapi_idx)
         only_x = context.get("only_tile_x")
         only_y = context.get("only_tile_y")
         if only_x is not None and only_y is not None:
@@ -229,13 +254,16 @@ def _prepare_and_load(context: Dict[str, Any]):
             context["window_mode"] = True
             context["tile_offset_x"] = x0
             context["tile_offset_y"] = y0
-            log_info(f"窗口化读取 DAPI：区域 ({x0},{y0}) 大小 {dapi.shape[1]}x{dapi.shape[0]}")
+            dapi_h, dapi_w = int(dapi.shape[0]), int(dapi.shape[1])
+            log_info(f"窗口化读取 DAPI：区域 ({x0},{y0}) 大小 {dapi_w}x{dapi_h}")
         else:
-            dapi = _read_dapi_full(image_path, dapi_idx, prefer_low_res=prefer_lr)
+            dapi = None
+            dapi_h, dapi_w = _get_dapi_shape(image_path, prefer_low_res=prefer_lr)
     except Exception:
         stack = read_qptiff_stack(image_path, prefer_low_res=prefer_lr)
         C = stack.shape[0]
         dapi_idx = next(((c.index - 1) for c in cfgs if c.is_dapi and (c.index - 1) < C), 0)
+        context["dapi_index0"] = int(dapi_idx)
         only_x = context.get("only_tile_x")
         only_y = context.get("only_tile_y")
         if only_x is not None and only_y is not None:
@@ -248,10 +276,14 @@ def _prepare_and_load(context: Dict[str, Any]):
             context["window_mode"] = True
             context["tile_offset_x"] = x0
             context["tile_offset_y"] = y0
-            log_info(f"窗口化读取 DAPI（回退栈）：区域 ({x0},{y0}) 大小 {dapi.shape[1]}x{dapi.shape[0]}")
+            dapi_h, dapi_w = int(dapi.shape[0]), int(dapi.shape[1])
+            log_info(f"窗口化读取 DAPI（回退栈）：区域 ({x0},{y0}) 大小 {dapi_w}x{dapi_h}")
         else:
             dapi = stack[dapi_idx]
-    log_info(f"DAPI 读取完成，尺寸 {dapi.shape[0]}x{dapi.shape[1]}，耗时 {time.time() - t0:.2f}s")
+            dapi_h, dapi_w = int(dapi.shape[0]), int(dapi.shape[1])
+    context["dapi_height"] = int(dapi_h)
+    context["dapi_width"] = int(dapi_w)
+    log_info(f"DAPI 读取完成，尺寸 {dapi_h}x{dapi_w}，耗时 {time.time() - t0:.2f}s")
     log_info("使用原始 DAPI 进行分割（解耦预处理与分割）")
     if not use_cellpose:
         log_error("未启用 Cellpose，且已移除传统分割路径")
@@ -296,7 +328,11 @@ def _prepare_output_dirs(out_dir: str, only_roi: bool):
 #  按 tiles 运行 Cellpose 分割，保存可视化，并记录每个核的质心坐标；基于 DAPI 构造细胞 ROI（固定半径+Voronoi）
 def _segment_tiles_and_save(dapi: np.ndarray, cp_model, context: Dict[str, Any], raw_dir: str, mask_dir: str, roi_dir: str):
     tile_size = int(context.get("tile_size", 1024))
-    H, W = dapi.shape
+    if dapi is not None:
+        H, W = dapi.shape
+    else:
+        H = int(context.get("dapi_height", 0))
+        W = int(context.get("dapi_width", 0))
     window_mode = bool(context.get("window_mode", False))
     if window_mode:
         rects = [(0, 0, H, W)]
@@ -315,10 +351,16 @@ def _segment_tiles_and_save(dapi: np.ndarray, cp_model, context: Dict[str, Any],
     all_centroids = []
     total_count = 0
     num_workers = int(context.get("num_workers", 1))
+    image_path = context.get("image_path") or context.get("input_path")
+    prefer_lr = bool(context.get("prefer_low_res", False))
+    dapi_idx = int(context.get("dapi_index0", 0))
     if num_workers > 1:
         log_info(f"并行分割：workers={num_workers}")
         def _process_one(idx: int, y0: int, x0: int, h: int, w: int):
-            dp = dapi[y0:y0+h, x0:x0+w]
+            if dapi is not None:
+                dp = dapi[y0:y0+h, x0:x0+w]
+            else:
+                dp = _read_dapi_window(str(image_path), dapi_idx, base_x0 + x0, base_y0 + y0, w, h, prefer_low_res=prefer_lr)
             try:
                 diam = context.get("cellpose_diameter", None)
                 bsz = context.get("cellpose_batch_size", None)
@@ -390,7 +432,10 @@ def _segment_tiles_and_save(dapi: np.ndarray, cp_model, context: Dict[str, Any],
     else:
         for idx, (y0, x0, h, w) in enumerate(rects, 1):
             log_info(f"[{idx}/{len(rects)}] 开始处理 tile (x={x0}, y={y0}, h={h}, w={w})")
-            dp = dapi[y0:y0+h, x0:x0+w]
+            if dapi is not None:
+                dp = dapi[y0:y0+h, x0:x0+w]
+            else:
+                dp = _read_dapi_window(str(image_path), dapi_idx, base_x0 + x0, base_y0 + y0, w, h, prefer_low_res=prefer_lr)
             try:
                 diam = context.get("cellpose_diameter", None)
                 bsz = context.get("cellpose_batch_size", None)

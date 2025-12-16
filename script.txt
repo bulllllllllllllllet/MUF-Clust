@@ -38,3 +38,6 @@ uv run sample_roi_features.py \
   --tiles-per-roi 2 \
   --num-workers 16 \
   --high-res
+
+  @single_image_seg_feat_cluster.py 对于这个脚本最终输出的/nfs5/zyh/MUF-Clust/scripts/single_image_seg_feat_cluster.py。
+能不能实现将里面所有的点根据其坐标，全部打印回一个和原图一样大小的tiff 文件。最终生成的是一张与原图大小一样的tiff文件。可以实现吗

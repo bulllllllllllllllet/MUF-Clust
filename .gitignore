@@ -5,3 +5,5 @@ outputs/
 src/*.egg-info/
 .venv/
 out_wholeWSI
+cluster_outputs
+single_image_output
